@@ -105,6 +105,80 @@ publicando; con dos detenidos el clúster rechaza la escritura (`acks=all` y `mi
 Más: `docs/red.md` (el diseño de las dos nubes) y `deploy/aws/verificar-permisos.sh` (la prueba de permisos del
 Learner Lab, que se corre desde esta carpeta con `bash deploy/aws/verificar-permisos.sh`).
 
+## Kafka (L10): los consumer groups, el panel en vivo y el catálogo
+
+`biblioteca-eventos` tiene **cuatro consumer groups**, cada uno en su carpeta y su módulo de Nest dentro de
+`src/streaming/`. Todos confirman el offset **a mano y después de escribir** en Postgres, y son idempotentes: un
+evento que llega dos veces no suma dos veces. El detalle está en `docs/consumer-groups.md`; los parámetros de cada
+topic, en `docs/topics.md`.
+
+| Consumer group | Lee | Escribe | Para qué |
+|---|---|---|---|
+| `biblioteca-panel` | `biblioteca.lecturas` y `biblioteca.prestamos` | `kpi_minuto` (una fila por evento) | El panel en vivo: por minuto y libro, lecturas en curso y préstamos |
+| `biblioteca-alertas` | `biblioteca.lecturas` | `ventanas_lectura` y `alertas` | Más del 20% de lecturas terminadas en error, por libro, en ventanas de 5 minutos, con al menos 5 terminadas |
+| `biblioteca-historial` | `biblioteca.prestamos` | `prestamos_semana` | Por semana y libro: prestados, devueltos y activos. Es el que se rebobina |
+| `biblioteca-catalogo` | `biblioteca.catalogo` (compactado) | `catalogo_libros` | El último estado de cada libro, reconstruido desde el offset 0 en cada arranque |
+
+`biblioteca-libros` publica su catálogo en `biblioteca.catalogo` (`libro.publicado` y `libro.actualizado`, key
+`libroId`, `cleanup.policy=compact`): al arrancar lee lo que ya está en el topic y publica solo lo que falta o
+cambió, y revisa `datos/catalogo.json` cada 5 segundos.
+
+**El panel en vivo.** Angular (`/panel`) pide `GET /v1/panel/en-vivo` al gateway cada 5 segundos; el gateway lo
+pasa al BFF, que exige el grupo `bibliotecarios` (el administrador de la biblioteca; con otro, **403**) y se lo
+pide a `biblioteca-eventos` (`GET /panel/en-vivo`), el dueño de `kpi_minuto` y `alertas`. El BFF nunca se conecta a
+Postgres. Con el simulador a `--velocidad 60`, el panel avanza unos cinco minutos de la noche por refresco.
+
+Para ver los grupos y su lag:
+
+```bash
+export MSYS_NO_PATHCONV=1   # solo en Git Bash
+docker compose exec broker-1 /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server broker-1:19092 --describe --group biblioteca-panel
+```
+
+**Rebobinar `biblioteca-historial`.** Se detiene el grupo (está dentro de `eventos`), se lleva su offset al
+principio y se levanta otra vez. Con el grupo vivo la herramienta se niega (`... the current state is Stable`):
+
+```bash
+docker compose stop eventos
+docker compose exec broker-1 /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server broker-1:19092 --group biblioteca-historial \
+  --topic biblioteca.prestamos --reset-offsets --to-earliest --execute     # NEW-OFFSET 0 en las tres
+docker compose up -d --wait eventos
+```
+
+Como es idempotente, `prestamos_semana` queda con las mismas cifras. Para verla **rehecha** desde cero, antes de
+levantar `eventos` se vacía lo que escribe ese grupo:
+
+```bash
+docker compose exec postgres psql -U biblioteca -d biblioteca -c "TRUNCATE prestamos_semana, prestamos_vistos" \
+  -c "DELETE FROM eventos_procesados WHERE grupo = 'biblioteca-historial'"
+```
+
+**Para repetir una demostración** (el panel, la alerta, el rebobinado): una segunda reproducción del mismo dataset
+no mueve nada, porque es entera de duplicados. Se vacían las tablas de lectura y se reproduce otra vez; la
+historia en Kafka no se toca:
+
+```bash
+docker compose exec postgres psql -U biblioteca -d biblioteca -c \
+  "TRUNCATE kpi_minuto, ventanas_lectura, alertas, prestamos_semana, prestamos_vistos, eventos_procesados"
+cd ../biblioteca-simulador && node reproducir.mjs --velocidad 60
+```
+
+**Tres y cuatro instancias de `eventos`** (para `docs/consumer-groups.md`). Las extra se levantan con
+`docker compose run`, que no publica el puerto 3010; en un equipo de 8 GB, con Kafka UI detenido:
+
+```bash
+docker compose stop kafka-ui
+docker compose run -d --no-deps --name eventos-2 eventos
+docker compose run -d --no-deps --name eventos-3 eventos     # tres instancias: 1, 1 y 1
+docker compose run -d --no-deps --name eventos-4 eventos     # cuatro: una queda con 0 particiones
+docker compose exec broker-1 /opt/kafka/bin/kafka-consumer-groups.sh \
+  --bootstrap-server broker-1:19092 --describe --members --group biblioteca-alertas
+docker stop eventos-2 eventos-3 eventos-4 && docker rm eventos-2 eventos-3 eventos-4
+docker compose start kafka-ui
+```
+
 ## El clúster de RabbitMQ (L8)
 
 ```

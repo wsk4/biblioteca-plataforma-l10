@@ -140,8 +140,18 @@ services:
   libros:
     build: ../biblioteca-libros
     init: true
+    # L10: publica el catalogo en biblioteca.catalogo (compactado) al arrancar y cuando cambia catalogo.json.
+    environment:
+      KAFKA_BROKERS: broker-1:19092,broker-2:19092,broker-3:19092
     ports:
       - "3001:3001"
+    depends_on:
+      broker-1:
+        condition: service_healthy
+      broker-2:
+        condition: service_healthy
+      broker-3:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3001/libros').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
       interval: 10s
