@@ -207,6 +207,8 @@ services:
     environment:
       LIBROS_URL: http://libros:3001
       PRESTAMOS_URL: http://prestamos:3002
+      # L10: el panel en vivo lo sirve biblioteca-eventos, dueno de kpi_minuto y alertas.
+      EVENTOS_URL: http://eventos:3010
     ports:
       - "3000:3000"
 
